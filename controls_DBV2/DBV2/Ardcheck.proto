@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+message Data
+{
+    float temperature1 = 1;
+    float Humidity1 = 2;
+    float temperature2 = 3;
+    float Humidity2 = 4;
+    float current1LTC = 5;
+    float current1INA = 6;
+    float current2INA = 7;
+    float current3INA = 8;
+    float current4INA = 9;
+    float current5INA = 10;
+    int32 DAQ_flag = 11;
+    string state = 12;
+    int32 switch1 = 13;
+    int32 switch2 = 14;
+    int32 PWM1 = 15;
+    int32 PWM2 = 16;
+    bool Hflag = 17;    
+    string input = 18;
+    bool Sflag = 19;
+}
+
+message command
+{
+    int32 RG_config = 1;
+    int32 spi_config = 2;
+    string character = 3;
+}
+

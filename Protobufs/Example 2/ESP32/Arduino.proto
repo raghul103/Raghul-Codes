@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+message Data
+{
+    float Temp1 = 1;
+    float Temp2 = 2;
+    float Curr1 = 3;
+    float Curr2 = 4;
+    float Curr3 = 5;
+    int32 DAQ_flag = 6;
+    float BattVolt = 7;
+    string state = 8;
+    int32 switch1 = 9;
+    int32 switch2 = 10;
+    int32 PWM1 = 11;
+    int32 PWM2 = 12;
+    bool Hflag = 13;    
+    string user = 14;
+    bool Sflag = 15;
+}
+
+message command
+{
+    int32 commandtype = 1;
+    string datas = 2;
+}
+
+message commandAck
+{
+    enum STATUS{
+       failure = 0;
+       success = 1;    
+    }
+    STATUS statuss = 7;
+}
+

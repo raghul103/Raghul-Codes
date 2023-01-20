@@ -1,0 +1,3 @@
+Data.state max_size:9
+Data.input max_size:2
+command.character max_size:2

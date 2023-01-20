@@ -1,0 +1,501 @@
+/*
+  drone-controls-v1
+
+  This Arduino sketch is part of Drone Borne V1 Control Systems. It's responsible for running the main control loops,
+  monitoring the health status, configuring the RF section, switching states based on necessary input triggers, 
+  and to serially print all it's internal data.
+
+  It's documented at https://docs.google.com/document/d/15bLK8-GvCGZKMEY-i9bkKVECmCefivNSJgXK7mzy6_A/edit?usp=sharing
+
+  modified 5 Dec 2022
+  by Nitesh Agarwal
+  Hardware Design Engineer - GalaxEye Space
+
+  Changes Made:
+  1. Temporary fix for the Imaging to Idle health flag bug was implemented
+  2. Removed the 1s timer to serial data send
+  3. Added non blocking delay
+
+  Changes to be made:
+  1. pulseIn function to be replaced with a non blocking function
+*/
+
+// libraries being used
+#include "mbed.h"
+#include "Arduino.h"
+//#include <Adafruit_MLX90614.h>
+#include "Wire.h"
+#include "spi_error.h"
+#include "encode.h"
+#include "sensor.h"
+// define state trigger pin
+#define switchTrig1 D13
+#define switchTrig2 D14
+#define droneTrig1 D4
+#define droneTrig2 D5
+
+// define current and voltage sensor pins
+#define relay1CurrPin A1
+#define dc5CurrPin A0
+#define dc15CurrPin A2
+#define battHealth A3
+
+// imaging mode triggers
+#define ECtrig D0
+
+// power triggers
+#define relay1trig D2 //relay 1
+#define relay2trig D1 //relay 2
+#define dc15vtrig D3 //dcdc15
+
+// rp gpio pin
+#define rpHealth D6
+
+// adc sampling bits and no. of samples
+
+
+
+#define SERIAL_DELAY 1000
+#define RP_DELAY 5000
+
+// SPI number of registers to write
+#define NO_OF_REGISTERS 131
+
+#define CNTEMP 5
+
+using namespace mbed;
+using namespace abc;
+using namespace ProtoLib;
+using namespace sense;
+
+// Threshold values
+
+float tempValueAmb;
+float tempValueObj;
+
+// safety state timers
+unsigned long startImaging = 0;
+unsigned long overflowImaging = 0;
+
+unsigned long lastTime = 0;
+unsigned long lastTimeRP = 0;
+
+// State LED
+// #define idle_status D18
+// #define ready_status D19
+// #define imaging_status D20
+
+// Flags
+bool HFlag;
+bool SFlag = true;
+
+// read user input
+char user_input[1];
+char input;
+
+int rise_time1, rise_time2, fall_time1, fall_time2;
+
+// defining MOSI,MISO,SCK,CS*
+SPI spi(PC_3, PC_2, PI_1, PI_0);
+
+//define temp sensors
+//Adafruit_MLX90614 mlx1 = Adafruit_MLX90614();
+
+// trigger values
+int trig1Read;
+int trig2Read;
+int pwm1Read;
+int pwm2Read;
+int rpHealthVal = 0;
+u_int64_t counter = 0;
+
+// States for finite state machine
+enum {IDLE_1, READY, IMAGING};
+unsigned char fsmState = IDLE_1;
+char enumState[3][8] = {"IDLE", "READY", "IMAGING"};
+
+// sg register value array
+uint32_t regValues[NO_OF_REGISTERS] = {0x008D00,0x008C27,0x008B10,0x008A00,0x008900,0x008800,0x008700,0x008604,0x0085C3,0x008450,0x008380,0x008200,0x008100,0x008000,0x007FC4,0x007EC3,0x007D50,0x007C80,0x007B00,0x007A00,0x007900,0x0078A4,0x0077C3,0x007650,0x007580,0x007400,0x007300,0x007200,0x007184,0x0070C3,0x006F50,0x006E80,0x006D00,0x006C00,0x006B00,0x006A64,0x0069A1,0x0068B8,0x006780,0x006600,0x006500,0x006400,0x006345,0x006241,0x00613C,0x00603F,0x005FFF,0x005EEC,0x005D61,0x005C25,0x005B00,0x005AFA,0x005980,0x005800,0x005700,0x005600,0x005500,0x005400,0x005300,0x005219,0x005100,0x005000,0x004F00,0x004EFB,0x004D00,0x004C00,0x004B00,0x004A00,0x004900,0x004800,0x004700,0x00460A,0x004500,0x0044FF,0x004300,0x004200,0x004100,0x004000,0x003F03,0x003E00,0x003D00,0x003C00,0x003B00,0x003A01,0x003900,0x002D00,0x002C00,0x002B00,0x002A00,0x002900,0x002800,0x002752,0x0026FA,0x0025FA,0x0024F2,0x002341,0x002204,0x002120,0x002000,0x001F32,0x001E0A,0x001D00,0x001C1F,0x001B08,0x001A00,0x001901,0x001800,0x001703,0x0016E8,0x001500,0x001400,0x001300,0x00122C,0x001100,0x00105F,0x000F00,0x000E00,0x000D00,0x000C00,0x000B00,0x000A00,0x000900,0x000800,0x000700,0x000600,0x000500,0x000400,0x000300,0x000201,0x000100,0x000018};
+
+// analog read function
+
+//Health function, make modifications as necessary
+void healthDataCheck() {
+  //temp sensors
+  int cnt1 = 0;
+
+  do{
+  tempValueAmb = Wire.read();
+  cnt1 += 1;
+  if(cnt1 <= CNTEMP)
+    continue;
+  else{ 
+    fsmState = IDLE_1;
+    break;
+    }  
+  }
+  while(isnan(tempValueAmb));
+  Serial.println(tempValueAmb);
+  
+  /*int cnt1 = 0, cnt2 = 0;
+  do{
+  tempValueAmb = mlx1.readAmbientTempC();
+  cnt1 += 1;
+  if(cnt1 <= CNTEMP)
+    continue;
+  else{ 
+    fsmState = IDLE_1;
+    break;
+    }  
+  }
+  while(isnan(tempValueAmb));
+  
+  do
+  {
+  tempValueObj = mlx1.readObjectTempC();  
+  cnt2 += 1;
+  if(cnt2 <= CNTEMP)
+    continue;
+  else{ 
+    fsmState = IDLE_1;
+    break;
+    }  
+  }
+  while(isnan(tempValueObj));  */
+
+ /*int cnt1 = 0, cnt2 = 0;
+  do{
+  tempValueAmb = mlx1.readAmbientTempC();
+  cnt1 += 1;
+  if(cnt1 <= CNTEMP)
+    continue;
+  else{ 
+    fsmState = IDLE_1;
+    break;
+    }  
+  }
+  while(isnan(tempValueAmb));
+  
+  do
+  {
+  tempValueObj = mlx1.readObjectTempC();  
+  cnt2 += 1;
+  if(cnt2 <= CNTEMP)
+    continue;
+  else{ 
+    fsmState = IDLE_1;
+    break;
+    }  
+  }
+  while(isnan(tempValueObj));
+  //current sensors
+  */
+  float currentRelay1Val = sensorRead(relay1CurrPin);
+  currentRelay1Val = 1.825 * (currentRelay1Val * 5.0 / 255.0) - 7.35; //formula for relay1 current
+  //Serial.println(currentRelay1Val);
+  float current5vDCVal = sensorRead(dc5CurrPin);
+  current5vDCVal = 1.815 * (current5vDCVal * 5.0 / 255.0) - 7.245; //formula for 5v dc current
+  float current15vDCVal = sensorRead(dc15CurrPin);
+  current15vDCVal = 1.815 * (current15vDCVal * 5.0 / 255.0) - 7.345; //formula for 15v dc current
+
+  // rp health
+  rpHealthVal = digitalRead(rpHealth);
+
+  // digital input triggers
+  trig1Read = digitalRead(switchTrig1);
+  trig2Read = digitalRead(switchTrig2);
+
+  // pwm input                          NOTE: NEED TO IMPROVE PERFORMANCE
+
+  
+ 
+ 
+  pwm1Read = pulseIn(droneTrig1, HIGH, 50000);
+  pwm2Read = pulseIn(droneTrig2, HIGH, 50000);
+
+  //batthealth
+  float battHVal = sensorRead(battHealth);
+  battHVal = 0.0609 * battHVal - 0.185;
+
+  counter = counter + 1;
+
+  // User input for state change
+  if (Serial.available() > 0) {
+    Serial.readBytes(user_input, 1);
+    if (user_input[0] == 'i' || user_input[0] == 'r' || user_input[0] == 'c') {
+      input = user_input[0];
+    }
+  }
+
+  /*
+    Print all the health values to EC in this order (Ambient temperature of RF bmperatuox, SG tere, 5v RF components current consumption, 
+    15v RF component current consumption(includes HPA), 5v DC DC current consumption, RP Health Flag, battery voltage, System state, 
+    Manual ready switch, Manual Imaging switch, imaging pwm signal value, ready pwm signal value, Health flag, EC input, Safety flag status)
+    
+  */
+//Serial.println(Serial.availableForWrite());
+  
+//  if (Serial.availableForWrite() > 60) {
+    int timeElapsed = millis();
+    if(timeElapsed-lastTime>SERIAL_DELAY){
+    uint8_t cobs_buffer[64];
+    int encoded_size = encode(cobs_buffer, tempValueAmb, tempValueObj, currentRelay1Val, current15vDCVal, current5vDCVal, rpHealthVal, battHVal, enumState[fsmState], trig1Read, trig2Read, pwm1Read, pwm2Read, HFlag, input, SFlag);
+    //Serial.println(currentRelay1Val);
+    //Serial.write(cobs_buffer, encoded_size);
+    lastTime = millis();
+    }
+
+   
+  int err = error(tempValueAmb, tempValueObj, current15vDCVal, current5vDCVal, currentRelay1Val, battHVal);     
+  if(err == 0)
+    HFlag = true;
+  else{
+    HFlag = false;
+  //  Serial.print(err, BIN);
+    }
+}
+/*
+void POSEDGE1_ISR()
+{
+  rise_time1 = micros();
+}
+
+void NEGEDGE1_ISR()
+{
+  fall_time1 = micros();
+  pwm1Read = fall_time1 - rise_time1;
+}
+
+void POSEDGE2_ISR()
+{
+  rise_time2 = micros();
+}
+
+void NEGEDGE2_ISR()
+{
+  fall_time2 = micros();
+  pwm2Read = fall_time2 - rise_time2;
+}
+*/
+void setup()
+{
+  Serial.begin(115200);  // Initialization of serial communication.
+  Serial.setTimeout(100);
+  // Serial.println("code uploaded");
+  lastTime = millis();
+  lastTimeRP = millis();
+
+  //Pins for SPI
+  pinMode(PC_2, INPUT);
+  pinMode(PC_3, OUTPUT);
+  pinMode(PC_1, OUTPUT);
+  pinMode(PI_0, OUTPUT);
+
+  //pinmode
+  pinMode(relay1trig, OUTPUT);        //5vamp trigger
+  pinMode(relay2trig, OUTPUT);        //relay2trig trigger
+  pinMode(dc15vtrig, OUTPUT);         //15v dc dc relay
+  pinMode(ECtrig, OUTPUT);            //EC trigger
+
+  //Pin config for analog and digital input
+  pinMode(relay1CurrPin, INPUT);
+  pinMode(dc5CurrPin, INPUT);
+  pinMode(dc15CurrPin, INPUT);
+  pinMode(battHealth, INPUT);
+  pinMode(droneTrig1, INPUT_PULLDOWN);
+  pinMode(droneTrig2, INPUT_PULLDOWN);
+  pinMode(switchTrig1, INPUT_PULLDOWN);
+  pinMode(switchTrig2, INPUT_PULLDOWN);
+  pinMode(rpHealth, INPUT_PULLDOWN);
+
+  //initial output
+  digitalWrite(ECtrig, LOW);          //EC trigger off
+  digitalWrite(relay1trig, LOW);      //5vamp off
+  digitalWrite(relay2trig, LOW);      //relay2trig off
+  digitalWrite(dc15vtrig, LOW);
+
+  //Initializing temp sensors
+//  mlx1.begin(0x5A);
+
+  //SPI Configuration
+  spi.frequency(1000000);             // Set up your frequency.
+  spi.format(24, 0);                  // Messege length (bits)
+  digitalWrite(PI_0, HIGH);           // Drive the CS HIGH.
+
+  Wire.begin(4);
+  
+ /* attachInterrupt(digitalPinToInterrupt(droneTrig1), POSEDGE1_ISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(droneTrig1), NEGEDGE1_ISR, FALLING);
+
+  attachInterrupt(digitalPinToInterrupt(droneTrig2), POSEDGE2_ISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(droneTrig2), NEGEDGE2_ISR, FALLING);  */
+}
+void loop()
+{
+  /* inputs:
+     temperature mlx1 = sg
+     current sensor x3 = relay1CurrPin, dc5CurrPin, dc15CurrPin, battery health voltage
+     state trigger = droneTrig1, droneTrig2, pwmTrig1, 
+
+    output triggers:
+     ECtrig, relay1trig, dc15vtrig, relay2trig
+
+  */
+
+  healthDataCheck();
+//  Serial.println(digitalRead(D0));
+//  Serial.println(digitalRead(D1));
+//  Serial.println(digitalRead(D2));
+//  Serial.println(digitalRead(D3));
+  int imgCount = 0;
+  HFlag = 1;
+  switch (fsmState)
+  {
+    
+    case IDLE_1:
+      if (HFlag == true && SFlag == true) {
+        Serial.println("HFlag and SFlag both true");
+        if (trig1Read == 1 || pwm2Read > 1700 || input == 'r') { //implement pwm input
+          Serial.println("idle to ready");
+        //  Serial.println(fsmState);
+          fsmState = READY;
+          imgCount = 0;
+        //  Serial.println(fsmState);
+          pwm2Read = 0;
+          break;
+        }
+        else {
+//          Serial.println("idle");
+          fsmState = IDLE_1;
+          digitalWrite(relay2trig, LOW);
+          digitalWrite(ECtrig, LOW);
+          digitalWrite(dc15vtrig, LOW);
+          if (rpHealthVal == 0)
+          {
+            int timeElapsedRP = millis();
+            if(timeElapsedRP-lastTimeRP>RP_DELAY){
+            delay(5000);
+            digitalWrite(relay1trig, LOW);
+            lastTimeRP = millis();}
+          }
+          imgCount = 0;
+          break;
+        }
+      }
+      else {
+        fsmState = IDLE_1;
+//        Serial.println("SFlag and HFlag not true");
+        digitalWrite(relay2trig, LOW);
+        digitalWrite(ECtrig, LOW);
+        digitalWrite(dc15vtrig, LOW);
+        if (rpHealthVal == 0)
+          {
+            int timeElapsedRP = millis();
+            if(timeElapsedRP-lastTimeRP>RP_DELAY){
+            delay(5000);
+            digitalWrite(relay1trig, LOW);
+            lastTimeRP = millis();}
+          }
+        imgCount = 0;
+        break;
+      }
+    //
+    case READY:
+      if (HFlag == true && SFlag == true) {
+          Serial.println("SFlag and HFlag true in Ready");
+        if (trig1Read == 1 || pwm2Read > 1700 || input == 'r' || input == 'c') {
+          Serial.println("In ready state");
+          digitalWrite(relay2trig, LOW);
+          digitalWrite(relay1trig, HIGH);
+          digitalWrite(ECtrig, LOW);
+          digitalWrite(dc15vtrig, LOW);
+
+          if (trig2Read == 1 ||  pwm1Read > 1700 || input == 'c') {
+            Serial.println("ready to imaging");
+            fsmState = IMAGING;
+            imgCount = 0;
+            break;
+          }
+          else {
+            fsmState = READY;
+            Serial.println("not going to imaging");
+            imgCount = 0;
+            digitalWrite(relay2trig, LOW);
+            digitalWrite(relay1trig, HIGH);
+            digitalWrite(ECtrig, LOW);
+            digitalWrite(dc15vtrig, LOW);
+            break;
+          }
+        }
+        else {
+          Serial.println("ready to idle break");
+          fsmState = IDLE_1;
+          imgCount = 0;
+          break;
+        }
+      }
+      else {
+        fsmState = IDLE_1;
+//        Serial.println("HFlag and SFlag not true in ready");
+        imgCount = 0;
+        break;
+      }
+
+    case IMAGING:
+      if (HFlag == true && SFlag == true) {
+        Serial.println("HFlag and SFlag true in Imaging");
+        if (trig1Read == 1 || pwm2Read > 1700 || input == 'c' || input == 'r') {
+          Serial.println("Imaging stage 1");
+          if (trig2Read == 1 || pwm1Read > 1700 || input == 'c') {
+            Serial.println("Imaging stage 2");
+            if (imgCount == 0) {
+//              Serial.println("imaging stage 3");
+              fsmState = IMAGING;
+              digitalWrite(relay2trig, HIGH);
+              digitalWrite(relay1trig, HIGH);
+              digitalWrite(ECtrig, HIGH);
+              digitalWrite(dc15vtrig, HIGH);
+              delay(100);
+              spiWriteSequence(regValues,NO_OF_REGISTERS);
+              startImaging = millis();
+              imgCount = 1;
+              break;
+            }
+            else {
+//              Serial.println("Imaging but without configuration");
+              fsmState = IMAGING;
+              imgCount = 1;
+              overflowImaging = millis();
+              
+              if ((overflowImaging - startImaging) >= 120000) // Checks if the system has been in imaging for longer than 100 seconds
+              {
+                fsmState = IDLE_1;
+//                Serial.println("State flag goes low");
+                SFlag = false; // Sets the safety flag to zero
+                break;
+              }
+              break;
+            }
+          }
+        else {
+          fsmState = READY;
+//          Serial.println("Imaging to ready");
+          imgCount = 0;
+          break;
+        }
+        }
+        else {
+          fsmState = IDLE_1;
+//          Serial.println("Imaging to idle");
+          imgCount = 0;
+          break;
+        }
+      }
+      else {
+        fsmState = IDLE_1;
+//        Serial.println("Sflag or HFlag false in imaging");
+        imgCount = 0;
+        break;
+      }
+  }       
+}
